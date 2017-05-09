@@ -741,7 +741,15 @@ fn upload_package(req: &mut Request) -> IronResult<Response> {
             None => return Ok(Response::with(status::NotFound)),
         };
 
-        route_message::<OriginPackageCreate, OriginPackage>(req, &package).unwrap();
+        match route_message::<OriginPackageCreate, OriginPackage>(req, &package) {
+            Ok(_) => (),
+            Err(err) => {
+                error!("Unable to create origin package for {:?}, err={:?}",
+                       ident,
+                       err);
+                return Ok(Response::with(status::InternalServerError));
+            }
+        }
 
         log_event!(req,
                    Event::PackageUpload {
@@ -1230,13 +1238,11 @@ fn create_channel(req: &mut Request) -> IronResult<Response> {
     }
 
     let origin_id = match try!(get_origin(req, &origin)) {
-        Some(origin) => {
-            origin.get_id()
-        }
+        Some(origin) => origin.get_id(),
         None => {
             debug!("Origin {} not found!", origin);
             return Ok(Response::with(status::NotFound));
-        },
+        }
     };
 
     let mut request = OriginChannelCreate::new();
@@ -1771,7 +1777,9 @@ pub fn run(config: Config) -> Result<()> {
 
     let mut mount = Mount::new();
     mount.mount("/v1", v1);
-    Iron::new(mount).http(&config.http).expect("Unable to start HTTP listener");
+    Iron::new(mount)
+        .http(&config.http)
+        .expect("Unable to start HTTP listener");
     broker.join().unwrap();
     Ok(())
 }

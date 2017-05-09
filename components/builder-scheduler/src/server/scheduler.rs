@@ -15,6 +15,7 @@
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+use chrono::prelude::*;
 use protobuf::{parse_from_bytes, Message};
 use hab_net::server::ZMQ_CONTEXT;
 use hab_net::routing::Broker;
@@ -25,6 +26,8 @@ use protocol::originsrv::*;
 use protocol::scheduler as proto;
 use data_store::DataStore;
 use error::{Result, Error};
+
+use server::logger::Logger;
 
 const SCHEDULER_ADDR: &'static str = "inproc://scheduler";
 const STATUS_ADDR: &'static str = "inproc://scheduler-status";
@@ -77,6 +80,7 @@ pub struct ScheduleMgr {
     status_sock: zmq::Socket,
     schedule_cli: ScheduleClient,
     msg: zmq::Message,
+    logger: Logger,
 }
 
 impl ScheduleMgr {
@@ -95,12 +99,15 @@ impl ScheduleMgr {
         let mut schedule_cli = ScheduleClient::default();
         try!(schedule_cli.connect());
 
+        let logger = Logger::init();
+
         Ok(ScheduleMgr {
                datastore: datastore,
                work_sock: work_sock,
                status_sock: status_sock,
                schedule_cli: schedule_cli,
                msg: msg,
+               logger: logger,
            })
     }
 
@@ -182,6 +189,9 @@ impl ScheduleMgr {
         let dispatchable = self.dispatchable_projects(&group)?;
         for project in dispatchable {
             debug!("Dispatching project: {:?}", project.get_name());
+            self.logger
+                .log(&format!("D, {}, {},", group.get_id(), project.get_name()));
+
             assert!(project.get_state() == proto::ProjectState::NotStarted);
 
             match self.schedule_job(group.get_id(), project.get_name()) {
@@ -196,6 +206,9 @@ impl ScheduleMgr {
                     self.datastore
                         .set_group_state(group.get_id(), proto::GroupState::Failed)?;
                     // TBD? set_project_state(group.get_id(), project.get_name(), proto::ProjectState::Failure)?;
+
+                    self.logger
+                        .log(&format!("S, {},, {:?}", group.get_id(), proto::GroupState::Failed));
                     break;
                 }
             }
@@ -280,6 +293,24 @@ impl ScheduleMgr {
         try!(self.status_sock.recv(&mut self.msg, 0));
         let job: Job = try!(parse_from_bytes(&self.msg));
 
+        let build_start = match DateTime::parse_from_rfc3339(job.get_build_started_at()) {
+            Ok(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            Err(_) => String::from(""),
+        };
+
+        let build_stop = match DateTime::parse_from_rfc3339(job.get_build_finished_at()) {
+            Ok(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            Err(_) => String::from(""),
+        };
+
+        self.logger
+            .log(&format!("J, {}, {}, {:?}, {}, {}",
+                          job.get_owner_id(),
+                          job.get_project().get_name(),
+                          job.get_state(),
+                          build_start,
+                          build_stop));
+
         match self.datastore.set_group_job_state(&job) {
             Ok(_) => {
                 match job.get_state() {
@@ -331,6 +362,8 @@ impl ScheduleMgr {
             };
 
             self.datastore.set_group_state(group_id, new_state)?;
+            self.logger
+                .log(&format!("S, {},, {:?}", group_id, new_state));
 
             if new_state == proto::GroupState::Pending {
                 try!(self.schedule_cli.notify_work());
